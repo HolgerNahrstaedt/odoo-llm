@@ -2,9 +2,8 @@ import json
 import logging
 import uuid
 
-from openai import OpenAI
-
 from odoo import api, models
+from openai import AzureOpenAI
 
 from ..utils.openai_message_validator import OpenAIMessageValidator
 
@@ -21,7 +20,11 @@ class LLMProvider(models.Model):
 
     def openai_get_client(self):
         """Get OpenAI client instance"""
-        return OpenAI(api_key=self.api_key, base_url=self.api_base or None)
+        return AzureOpenAI(
+            api_key=self.api_key,
+            api_version=self.api_version,
+            azure_endpoint=self.api_base or None,
+        )
 
     # OpenAI specific implementation
     def openai_format_tools(self, tools):
@@ -247,6 +250,8 @@ class LLMProvider(models.Model):
         tool_call_chunks = {}
 
         for chunk in response:
+            if not chunk.choices:
+                continue
             delta = chunk.choices[0].delta
 
             # Handle normal content
