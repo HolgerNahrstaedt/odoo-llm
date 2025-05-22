@@ -215,6 +215,8 @@ class LLMProvider(models.Model):
 
         try:
             for chunk in response_stream:
+                if not chunk.choices:
+                    continue
                 choice = chunk.choices[0] if chunk.choices else None
                 delta = choice.delta if choice else None
                 chunk_finish_reason = choice.finish_reason if choice else None
@@ -274,60 +276,6 @@ class LLMProvider(models.Model):
                 elif finish_reason != "error":
                     _logger.warning(
                         f"OpenAI stream had tool chunks but finished with reason '{finish_reason}'. Not yielding tool calls."
-        return params
-
-    def _process_non_streaming_response(self, response):
-        """Process a non-streaming response from OpenAI"""
-        message = {
-            "role": response.choices[0].message.role,
-            "content": response.choices[0].message.content or "",  # Handle None content
-        }
-
-        # Handle tool calls if present
-        if (
-            hasattr(response.choices[0].message, "tool_calls")
-            and response.choices[0].message.tool_calls
-        ):
-            message["tool_calls"] = []
-
-            for tool_call in response.choices[0].message.tool_calls:
-                # Return the tool call without executing it
-                tool_call_data = {
-                    "id": tool_call.id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.function.name,
-                        "arguments": tool_call.function.arguments,
-                    },
-                }
-                message["tool_calls"].append(tool_call_data)
-
-        yield message
-
-    def _process_streaming_response(self, response):
-        """Process a streaming response from OpenAI"""
-        tool_call_chunks = {}
-
-        for chunk in response:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-
-            # Handle normal content
-            if hasattr(delta, "content") and delta.content is not None:
-                yield {
-                    "role": "assistant",
-                    "content": delta.content,
-                }
-
-            # Handle streaming tool calls
-            if hasattr(delta, "tool_calls") and delta.tool_calls:
-                for tool_call_chunk in delta.tool_calls:
-                    index = tool_call_chunk.index
-
-                    # Initialize or update tool call data
-                    tool_call_chunks = self._update_tool_call_chunk(
-                        tool_call_chunks, tool_call_chunk, index
                     )
 
         except Exception as e:
