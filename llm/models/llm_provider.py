@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from odoo import _, api, fields, models
-from odoo.exceptions import UserError
+from odoo.exceptions import UserError, ValidationError
 
 
 class LLMProvider(models.Model):
@@ -26,23 +26,39 @@ class LLMProvider(models.Model):
     api_version = fields.Char()
     model_ids = fields.One2many("llm.model", "provider_id", string="Models")
 
+    @api.constrains("name")
+    def _check_unique_name(self):
+        other_providers = self.search([("id", "not in", self.ids)])
+        existing_names_lower = [p.name.lower() for p in other_providers if p.name]
+        for record in self:
+            if record.name and record.name.lower() in existing_names_lower:
+                raise ValidationError(
+                    _("The provider name must be unique (case-insensitive).")
+                )
+
+        return True
+
     @property
     def client(self):
         """Get client instance using dispatch pattern"""
         return self._dispatch("get_client")
 
-    def _dispatch(self, method, *args, **kwargs):
-        """Dispatch method call to appropriate service implementation"""
+    def _dispatch(self, method, *args, record=None, **kwargs):
+        """Dispatch method call to appropriate service implementation on self or a given record."""
         if not self.service:
             raise UserError(_("Provider service not configured"))
 
         service_method = f"{self.service}_{method}"
-        if not hasattr(self, service_method):
+        record = record if record else self
+        record_name = record._name
+
+        if not hasattr(record, service_method):
             raise NotImplementedError(
-                _("Method %s not implemented for service %s") % (method, self.service)
+                _("Method '%s' not implemented for service '%s' on target '%s'")
+                % (method, self.service, record_name)
             )
 
-        return getattr(self, service_method)(*args, **kwargs)
+        return getattr(record, service_method)(*args, **kwargs)
 
     @api.model
     def _selection_service(self):
@@ -65,9 +81,9 @@ class LLMProvider(models.Model):
         """Generate embeddings using this provider"""
         return self._dispatch("embedding", texts, model=model)
 
-    def list_models(self):
+    def list_models(self, model_id=None):
         """List available models from the provider"""
-        return self._dispatch("models")
+        return self._dispatch("models", model_id=model_id)
 
     def get_model(self, model=None, model_use="chat"):
         """Get a model to use for the given purpose
@@ -152,21 +168,3 @@ class LLMProvider(models.Model):
             List of formatted messages in provider-specific format
         """
         return self._dispatch("format_messages", messages, system_prompt=system_prompt)
-
-    @api.model
-    def _default_format_message(self, message):
-        """Default implementation for formatting message
-
-        This provides a basic implementation that can be overridden by provider-specific modules.
-
-        Args:
-            message: mail.message record or similar data structure to format
-
-        Returns:
-            Formatted message in a standard format
-        """
-
-        return {
-            "role": "user" if message.author_id else "assistant",
-            "content": message.body or "",  # Ensure content is never null
-        }

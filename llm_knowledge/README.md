@@ -1,181 +1,77 @@
-# LLM RAG - Retrieval Augmented Generation for Odoo
+# LLM Knowledge
 
-This module implements Retrieval Augmented Generation (RAG) for the LLM module in Odoo, providing a complete pipeline for processing documents and making them available for AI-powered search and generation.
+This Odoo module implements Retrieval Augmented Generation (RAG) capabilities for the LLM framework, providing document chunking and vector embedding for enhanced AI responses.
 
 ## Features
 
-- **Document Management**: Dedicated system for organizing and tracking RAG documents
-- **Complete RAG Pipeline**: Process documents through retrieval, parsing, chunking, and embedding
-- **Vector Search**: Semantic search capabilities using pgvector for PostgreSQL
-- **Multiple Document Sources**: Support for Odoo records, file uploads, and external URLs
-- **Extensible Architecture**: Easy to extend with custom parsers, chunkers, and retrievers
-- **User-Friendly Wizards**: Intuitive interfaces for creating and managing documents
-- **Collection Management**: Group documents into collections for targeted retrieval
-- **HTTP Retrieval**: Fetch and process content from external URLs
-- **PDF Processing**: Advanced PDF handling with text and image extraction
-
-## Pipeline Overview
-
-Documents flow through a well-defined pipeline:
-
-1. **Retrieval**: Extract document content from source records or external URLs
-2. **Parsing**: Convert document content to a standardized format (markdown)
-3. **Chunking**: Split documents into semantic chunks for effective retrieval
-4. **Embedding**: Create vector representations of chunks for semantic search
-
-## Technical Details
-
-### Extensibility
-
-The module is designed to be highly extensible at every stage of the pipeline:
-
-- **Retrievers**: Custom retrieval logic for different document types
-
-  - Default Retriever: Works with any Odoo record
-  - HTTP Retriever: Fetches content from external URLs
-
-- **Parsers**: Support for different file formats
-
-  - Default Parser: Generic parser for Odoo records
-  - JSON Parser: Structured output for record data
-  - PDF Parser: Extracts text and images from PDF files
-  - Text Parser: Handles plain text files
-
-- **Chunkers**: Different algorithms for document segmentation
-
-  - Default Chunker: Splits text into overlapping chunks with configurable size
-
-- **Embedding Models**: Integration with vector embedding models
-  - Uses the `llm_pgvector` module for vector storage and search
-
-### Collections
-
-Documents are organized into collections, which:
-
-- Share the same embedding model
-- Can be queried as a unified knowledge base
-- Support domain-based document addition
-- Allow for document uploading directly from files or URLs
-
-### Integration with PostgreSQL
-
-- Uses pgvector extension for efficient vector search
-- Creates optimized indices for each embedding model
-- Supports cosine similarity for semantic matching
+- **Document Collections**: Organize resources into collections for targeted knowledge retrieval
+- **Document Chunking**: Split documents into manageable chunks for more precise retrieval
+- **Vector Embeddings**: Generate embeddings for semantic search capabilities
+- **Vector Store Integration**: Seamless integration with multiple vector database options:
+  - PgVector: Native PostgreSQL vector storage and search
+  - Chroma: Integration with Chroma vector database
+  - Qdrant: Support for Qdrant vector search engine
+- **PDF Processing**: Extract and process text from PDF documents
 
 ## Installation
 
-### Dependencies
+1. Clone the repository into your Odoo addons directory.
+2. Install the module via the Odoo Apps menu.
+3. Install at least one vector store integration (llm_pgvector, llm_chroma, or llm_qdrant).
 
-The module has the following dependencies:
+## Configuration
 
-- `llm`: Base LLM module
-- `llm_pgvector`: PostgreSQL vector extension integration
-
-### Python Dependencies
-
-- `PyMuPDF`: For PDF processing
-- `numpy`: For numerical operations
-- `requests`: For HTTP retrieval
-- `markdownify`: For HTML to markdown conversion
+1. Navigate to LLM > Knowledge > Collections
+2. Create a new collection and configure the embedding model
+3. Add resources to the collection either manually or using domain filters
+4. Process resources to generate chunks and embeddings
 
 ## Usage
 
-### Creating RAG Documents
+### Creating a Knowledge Collection
 
-**From Odoo Records:**
+1. Go to LLM > Knowledge > Collections
+2. Click "Create" to add a new collection
+3. Configure the collection with a name and embedding model
+4. Add resources to the collection
 
-1. Select records in any model
-2. Use the "Create RAG Document" action
-3. Configure document processing options
-4. Process documents through the pipeline
+### Processing Resources
 
-**From Files:**
+1. Select resources in the collection
+2. Use the "Process Resources" action to:
+   - Retrieve content from sources
+   - Parse content into markdown
+   - Split content into chunks
+   - Generate embeddings for each chunk
 
-1. Open a collection
-2. Click "Upload Documents"
-3. Select local files or provide URLs
-4. Configure processing options
+### Using in RAG
 
-**From Domain Queries:**
+The processed collections can be used in LLM conversations for retrieval augmented generation:
 
-1. Open a collection
-2. Add domains for specific models
-3. Click "Add Documents from Domain"
-4. Process the created documents
+1. Enable RAG in a thread
+2. Select the relevant collections
+3. The LLM will automatically retrieve relevant chunks based on the conversation context
 
-### Processing Documents
+## Dependencies
 
-Documents can be processed:
+- Odoo 16.0 or later
+- Python 3.8 or later
+- Required Odoo modules:
+  - llm
+  - llm_resource
+  - llm_store
+- Python libraries:
+  - PyMuPDF
+  - numpy
+- At least one vector store integration:
+  - llm_pgvector (requires pgvector extension for PostgreSQL)
+  - llm_chroma (requires chromadb-client)
+  - llm_qdrant (requires qdrant-client)
 
-- Individually from their form view
-- In batches from the document list view
-- Automatically during creation by enabling "Process Immediately"
-- At the collection level with the "Process Documents" button
+## Contributing
 
-### Searching with RAG
-
-The module creates vector embeddings that can be used by the LLM module to perform semantic searches. Document chunks can be directly searched using the Document Chunks view with the vector search option.
-
-## Development
-
-### Adding Custom Retrievers
-
-Extend the `_get_available_retrievers` method in `llm_document_retrievers.py` and implement your custom retrieval logic.
-
-```python
-@api.model
-def _get_available_retrievers(self):
-    retrievers = super()._get_available_retrievers()
-    retrievers.append(("my_retriever", "My Custom Retriever"))
-    return retrievers
-```
-
-### Adding Custom Parsers
-
-Extend the `_get_available_parsers` method in `llm_document_parsers.py` and implement your custom parsing logic.
-
-```python
-@api.model
-def _get_available_parsers(self):
-    parsers = super()._get_available_parsers()
-    parsers.append(("my_parser", "My Custom Parser"))
-    return parsers
-
-def _parse_my_parser(self, record):
-    # Implement custom parsing logic
-    return True
-```
-
-### Adding Custom Chunkers
-
-Extend the `_get_available_chunkers` method in `llm_document_chunkers.py` and implement your custom chunking algorithm.
-
-```python
-@api.model
-def _get_available_chunkers(self):
-    chunkers = super()._get_available_chunkers()
-    chunkers.append(("my_chunker", "My Custom Chunker"))
-    return chunkers
-
-def _chunk_my_chunker(self):
-    # Implement custom chunking logic
-    return True
-```
-
-## Model Overview
-
-- **llm.document**: Main document model managing the RAG pipeline
-- **llm.document.chunk**: Document segments with vector embeddings
-- **llm.document.collection**: Groups of documents sharing an embedding model
-- **llm.create.rag.document.wizard**: Wizard for creating documents from records
-- **llm.upload.document.wizard**: Wizard for uploading documents from files/URLs
-- **llm.add.domain.wizard**: Wizard for adding domain filters to collections
+Contributions are welcome! Please follow the contribution guidelines in the repository.
 
 ## License
 
-This module is licensed under LGPL-3.
-
-## Credits
-
-Developed by Apexive Solutions LLC
+This module is licensed under the LGPL-3 license.

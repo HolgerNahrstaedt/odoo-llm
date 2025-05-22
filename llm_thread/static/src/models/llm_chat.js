@@ -13,8 +13,8 @@ const THREAD_SEARCH_FIELDS = [
   "write_date",
   "model_id",
   "provider_id",
-  "related_thread_model",
-  "related_thread_id",
+  "model",
+  "res_id",
   "tool_ids",
 ];
 
@@ -116,8 +116,8 @@ registerModel({
           : undefined,
         isServerPinned: true,
         updatedAt: threadData.write_date,
-        relatedThreadModel: threadData.related_thread_model,
-        relatedThreadId: threadData.related_thread_id,
+        relatedThreadModel: threadData.model,
+        relatedThreadId: threadData.res_id,
         selectedToolIds: threadData.tool_ids || [],
       };
 
@@ -251,8 +251,8 @@ registerModel({
         provider_id: defaultModel.llmProvider.id,
       };
       if (relatedThreadModel && relatedThreadId) {
-        threadData.related_thread_model = relatedThreadModel;
-        threadData.related_thread_id = relatedThreadId;
+        threadData.model = relatedThreadModel;
+        threadData.res_id = relatedThreadId;
       }
 
       const threadId = await this.messaging.rpc({
@@ -460,29 +460,29 @@ registerModel({
     llmModels: many("LLMModel"),
     llmProviders: many("LLMProvider", {
       compute() {
-        if (!this.llmModels) return clear();
-        const providersMap = new Map();
-        for (const model of this.llmModels) {
-          const providerId = model.llmProvider?.id;
-          const providerName = model.llmProvider?.name;
-          if (providerId && !providersMap.has(providerId)) {
-            providersMap.set(providerId, {
-              id: providerId,
-              name: providerName,
-            });
-          }
+        if (!this.llmModels || !Array.isArray(this.llmModels)) {
+          return [];
         }
-        return Array.from(providersMap.values());
+        const providers = this.llmModels
+          .map((m) => (m && m.llmProvider ? m.llmProvider : null))
+          .filter((p) => p && p.id);
+        return [...new Map(providers.map((p) => [p.id, p])).values()];
       },
     }),
     defaultLLMModel: one("LLMModel", {
       compute() {
-        if (!this.llmModels) return clear();
-        return (
-          this.llmModels.find((model) => model.default) ||
-          this.llmModels[0] ||
-          clear()
-        );
+        if (!this.llmModels || !Array.isArray(this.llmModels)) {
+          return clear();
+        }
+        const activeModel = this.activeThread?.llmModel;
+        if (!activeModel) {
+          return this.llmModels.length > 0 && this.llmModels[0]
+            ? this.llmModels[0]
+            : clear();
+        }
+
+        const found = this.llmModels.find((m) => m && m.id === activeModel.id);
+        return found ? found : clear();
       },
     }),
     tools: many("LLMTool"),

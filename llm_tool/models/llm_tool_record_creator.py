@@ -1,6 +1,5 @@
 import logging
-
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Any
 
 from odoo import api, models
 
@@ -15,51 +14,30 @@ class LLMToolRecordCreator(models.Model):
         implementations = super()._get_available_implementations()
         return implementations + [("odoo_record_creator", "Odoo Record Creator")]
 
-    def odoo_record_creator_get_pydantic_model(self):
-        class RecordCreatorParams(BaseModel):
-            """This function creates a new record in the specified Odoo model with the provided values. Use the key 'fields' to provide the dictionary of field values."""
+    def odoo_record_creator_execute(
+        self, model: str, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Create a new record in the specified Odoo model
 
-            model_config = ConfigDict(
-                title=self.name or "odoo_record_creator",
-            )
-            model: str = Field(..., description="The Odoo model to create a record in")
-            fields: dict = Field(
-                ...,
-                description="Dictionary of field values for the new record. Use the key 'fields' for this parameter.",
-            )
+        Parameters:
+            model: The Odoo model to create a record in
+            fields: Dictionary of field values for the new record
+        """
+        _logger.info(
+            f"Executing Odoo Record Creator with: model={model}, fields={fields}"
+        )
 
-        return RecordCreatorParams
+        model_obj = self.env[model]
 
-    def odoo_record_creator_execute(self, parameters):
-        """Execute the Odoo Record Creator tool"""
-        _logger.info(f"Executing Odoo Record Creator with parameters: {parameters}")
+        # Create the record
+        new_record = model_obj.create(fields)
 
-        model_name = parameters.get("model")
-        fields = parameters.get("fields", {})
+        # Return the ID and display name of the created record
+        result = {
+            "id": new_record.id,
+            "display_name": new_record.display_name,
+            "message": f"Record created successfully in {model}",
+        }
 
-        if not model_name:
-            return {"error": "Model name is required"}
-
-        if not fields:
-            return {"error": "Fields dictionary is required"}
-
-        try:
-            model = self.env[model_name]
-
-            # Create the record
-            new_record = model.create(fields)
-
-            # Return the ID and display name of the created record
-            result = {
-                "id": new_record.id,
-                "display_name": new_record.display_name,
-                "message": f"Record created successfully in {model_name}",
-            }
-
-            return result
-
-        except KeyError:
-            return {"error": f"Model '{model_name}' not found"}
-        except Exception as e:
-            _logger.exception(f"Error executing Odoo Record Creator: {str(e)}")
-            return {"error": str(e)}
+        return result

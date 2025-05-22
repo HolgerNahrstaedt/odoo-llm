@@ -1,3 +1,4 @@
+import ast
 import json
 import logging
 import uuid
@@ -7,7 +8,7 @@ import ollama
 from odoo import api, models
 
 from ..utils.ollama_message_validator import OllamaMessageValidator
-from ..utils.tool_id_utils import ToolIdUtils
+from ..utils.ollama_tool_call_id_utils import OllamaToolCallIdUtils
 
 _logger = logging.getLogger(__name__)
 
@@ -38,37 +39,36 @@ class LLMProvider(models.Model):
         Returns:
             Dictionary in Ollama tool format
         """
-        # First try to use overridden schema if available
-        if tool.override_tool_schema and tool.overriden_schema:
-            try:
-                schema = json.loads(tool.overriden_schema)
+        try:
+            # First use the explicit input_schema if available
+            if tool.input_schema:
+                try:
+                    schema = json.loads(tool.input_schema)
+                    return self._create_ollama_tool_from_schema(schema, tool)
+                except json.JSONDecodeError:
+                    _logger.error(f"Invalid JSON schema for tool {tool.name}")
+                    # Continue to next approach
+
+            # Next generate schema from the tool's method signature
+            schema = tool.get_input_schema()
+            if schema:
                 return self._create_ollama_tool_from_schema(schema, tool)
-            except json.JSONDecodeError:
-                _logger.error(f"Invalid JSON schema for tool {tool.name}")
-                # Continue to next approach
 
-        # Next try to use Pydantic model
-        try:
-            pydantic_model = tool.get_pydantic_model()
-            if pydantic_model:
-                # Get schema directly from Pydantic model
-                model_schema = pydantic_model.model_json_schema()
-                return self._create_ollama_tool_from_schema(model_schema, tool)
-        except Exception as e:
-            _logger.error(f"Error using Pydantic model for {tool.name}: {str(e)}")
-            # Continue to fallback approach
-
-        # Fallback to using the stored schema
-        try:
-            schema = json.loads(tool.schema)
+            # If we still don't have a schema, use minimal fallback
+            _logger.warning(
+                f"Could not get schema for tool {tool.name}, using fallback"
+            )
+            schema = {"type": "object", "properties": {}, "required": []}
             return self._create_ollama_tool_from_schema(schema, tool)
-        except json.JSONDecodeError:
-            _logger.error(f"Invalid JSON schema for tool {tool.name}")
+
+        except Exception as e:
+            _logger.error(f"Error formatting tool {tool.name}: {str(e)}")
             # Use minimal fallback schema
             schema = {
                 "title": tool.name,
                 "description": tool.description,
                 "properties": {},
+                "required": [],
             }
             return self._create_ollama_tool_from_schema(schema, tool)
 
@@ -85,10 +85,8 @@ class LLMProvider(models.Model):
         formatted_tool = {
             "type": "function",
             "function": {
-                "name": schema.get("title", tool.name),
-                "description": tool.description
-                if tool.override_tool_description
-                else schema.get("description", ""),
+                "name": tool.name,
+                "description": tool.description,
                 "parameters": {
                     "type": "object",
                     "properties": schema.get("properties", {}),
@@ -99,72 +97,28 @@ class LLMProvider(models.Model):
 
         return formatted_tool
 
-    def ollama_chat(self, messages, model=None, stream=False, tools=None, **kwargs):
+    def ollama_chat(
+        self,
+        messages,
+        model=None,
+        stream=False,
+        tools=None,
+        system_prompt=None,
+        **kwargs,
+    ):
         """Send chat messages using Ollama with tools support"""
         model = self.get_model(model, "chat")
 
-        # Prepare request parameters
-        params = self._prepare_ollama_chat_params(model, messages, stream, tools=tools)
+        params = self._prepare_chat_params(
+            model, messages, stream, tools=tools, system_prompt=system_prompt
+        )
 
-        # Make the API call
         response = self.client.chat(**params)
 
-        # Process the response based on streaming mode
         if not stream:
             return self.ollama_process_non_streaming_response(response)
         else:
             return self.ollama_process_streaming_response(response)
-
-    def _prepare_ollama_chat_params(self, model, messages, stream, tools):
-        """Prepare parameters for Ollama API call"""
-        params = {
-            "model": model.name,
-            "messages": messages.copy(),  # Create a copy to avoid modifying the original
-            "stream": stream,
-        }
-
-        # Add tools if specified
-        if tools:
-            formatted_tools = self.ollama_format_tools(tools)
-
-            if formatted_tools:
-                params["tools"] = formatted_tools
-
-                # Check if any tools require consent
-                consent_required_tools = tools.filtered(
-                    lambda t: t.requires_user_consent
-                )
-
-                # Only add consent instructions if there are tools requiring consent
-                if consent_required_tools:
-                    # Get names of tools requiring consent for more specific instructions
-                    consent_tool_names = ", ".join(
-                        [f"'{t.name}'" for t in consent_required_tools]
-                    )
-
-                    # Get consent message template from config
-                    config = self.env["llm.tool.consent.config"].get_active_config()
-                    consent_instruction = config.system_message_template.format(
-                        tool_names=consent_tool_names
-                    )
-
-                    # Check if a system message already exists
-                    has_system_message = False
-                    for msg in params["messages"]:
-                        if msg.get("role") == "system":
-                            # Add to existing system message
-                            msg["content"] += f"\n\n{consent_instruction}"
-                            has_system_message = True
-                            break
-
-                    # If no system message exists, add one
-                    if not has_system_message:
-                        # Insert system message at the beginning
-                        params["messages"].insert(
-                            0, {"role": "system", "content": consent_instruction}
-                        )
-
-        return params
 
     def ollama_process_non_streaming_response(self, response):
         """Process a non-streaming response from Ollama"""
@@ -173,22 +127,21 @@ class LLMProvider(models.Model):
             "content": response["message"]["content"] or "",  # Handle None content
         }
 
-        # Handle tool calls if present
         if "tool_calls" in response["message"] and response["message"]["tool_calls"]:
             message["tool_calls"] = []
 
             for tool_call in response["message"]["tool_calls"]:
-                # Return the tool call without executing it
+                tool_name = tool_call["function"]["name"]
+                tool_id = OllamaToolCallIdUtils.create_tool_id(
+                    tool_name, str(uuid.uuid4())
+                )
+
                 tool_call_data = {
-                    "id": tool_call.get("id", ""),
+                    "id": tool_id,
                     "type": "function",
-                    "function": {
-                        "name": tool_call["function"]["name"],
-                        "arguments": "",
-                    },
+                    "function": {"name": tool_name, "arguments": ""},
                 }
 
-                # Handle different types of arguments
                 if "function" in tool_call and "arguments" in tool_call["function"]:
                     arguments = tool_call["function"]["arguments"]
                     if isinstance(arguments, dict):
@@ -196,7 +149,6 @@ class LLMProvider(models.Model):
                     elif isinstance(arguments, str):
                         tool_call_data["function"]["arguments"] = arguments
                     else:
-                        # For any other type, convert to string via JSON
                         try:
                             tool_call_data["function"]["arguments"] = json.dumps(
                                 arguments
@@ -212,105 +164,119 @@ class LLMProvider(models.Model):
         yield message
 
     def ollama_process_streaming_response(self, response):
-        """Process a streaming response from Ollama"""
-        tool_call_chunks = {}
+        """
+        Processes Ollama stream and yields standardized dicts.
+        Yields: {'content': str} OR {'tool_calls': list} OR {'error': str}
+        """
+        assembled_tool_calls = {}
+        final_tool_calls_list = []
+        stream_has_tools = False
+        is_done = False
         last_content = ""
 
-        for chunk in response:
-            # Handle normal content
-            if (
-                "message" in chunk
-                and "content" in chunk["message"]
-                and chunk["message"]["content"]
-            ):
-                content = chunk["message"]["content"]
-                # Only yield if there's new content
-                if content != last_content:
-                    last_content = content
-                    yield {
-                        "role": "assistant",
-                        "content": content,
-                    }
+        try:
+            for chunk in response:
+                if not chunk:
+                    continue
 
-            # Handle tool calls
-            if (
-                "message" in chunk
-                and "tool_calls" in chunk["message"]
-                and chunk["message"]["tool_calls"]
-            ):
-                for i, tool_call in enumerate(chunk["message"]["tool_calls"]):
-                    # Use the index from the loop if not provided in the response
-                    index = tool_call.get("index", i)
+                message = chunk.get("message", {})
+                content_chunk = message.get("content")
+                tool_calls_chunk = message.get("tool_calls")
+                chunk_done = chunk.get("done", False)
+                error_msg = chunk.get("error")
 
-                    # Get the tool name
-                    tool_name = tool_call["function"]["name"]
+                if error_msg:
+                    yield {"error": f"Ollama stream error: {error_msg}"}
+                    return
 
-                    # Generate a unique ID that includes the tool name
-                    tool_id = ToolIdUtils.create_tool_id(tool_name, str(uuid.uuid4()))
+                if chunk_done:
+                    is_done = True
 
-                    # Initialize tool call data if it doesn't exist
-                    if index not in tool_call_chunks:
-                        tool_call_chunks[index] = {
-                            "id": tool_id,
-                            "type": "function",
-                            "function": {
-                                "name": tool_name,
-                                "arguments": "",
-                            },
-                        }
+                if content_chunk is not None and content_chunk != last_content:
+                    yield {"content": content_chunk}
+                    last_content = content_chunk
 
-                    # Update arguments
-                    if "arguments" in tool_call["function"]:
-                        arguments = tool_call["function"]["arguments"]
+                if tool_calls_chunk:
+                    stream_has_tools = True
+                    for i, tool_call_delta in enumerate(tool_calls_chunk):
+                        assembled_tool_calls = self._ollama_update_tool_call_chunk(
+                            assembled_tool_calls, tool_call_delta, i
+                        )
 
-                        # Handle different argument types, but always store as JSON string
-                        # for consistency with llm_thread module
-                        if isinstance(arguments, dict):
-                            # Convert dictionary to JSON string
-                            tool_call_chunks[index]["function"]["arguments"] = (
-                                json.dumps(arguments)
-                            )
-                        elif isinstance(arguments, str):
-                            # If it's already a string, check if it's valid JSON
-                            try:
-                                # Parse and re-stringify to ensure consistent formatting
-                                parsed = json.loads(arguments)
-                                tool_call_chunks[index]["function"]["arguments"] = (
-                                    json.dumps(parsed)
-                                )
-                            except json.JSONDecodeError:
-                                # If it's not valid JSON, use as is (might be plain text)
-                                tool_call_chunks[index]["function"]["arguments"] = (
-                                    arguments
-                                )
-                                _logger.warning(
-                                    f"Received string arguments that aren't valid JSON: {arguments}"
-                                )
-                        else:
-                            # For any other type, try to convert to JSON string
-                            try:
-                                tool_call_chunks[index]["function"]["arguments"] = (
-                                    json.dumps(arguments)
-                                )
-                            except (TypeError, ValueError):
-                                # If conversion fails, use string representation
-                                tool_call_chunks[index]["function"]["arguments"] = str(
-                                    arguments
-                                )
-                                _logger.warning(
-                                    f"Couldn't convert arguments to JSON: {type(arguments)}"
-                                )
+            if stream_has_tools and is_done:
+                for _, call_data in sorted(assembled_tool_calls.items()):
+                    if call_data.get("_complete"):
+                        tool_name = call_data["function"]["name"]
+                        tool_id = OllamaToolCallIdUtils.create_tool_id(
+                            tool_name, str(uuid.uuid4())
+                        )
+                        final_tool_calls_list.append(
+                            {
+                                "id": tool_id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": call_data["function"]["arguments"],
+                                },
+                            }
+                        )
 
-                    # Yield the tool call
-                    yield {
-                        "role": "assistant",
-                        "tool_call": tool_call_chunks[index],
-                    }
+                if final_tool_calls_list:
+                    yield {"tool_calls": final_tool_calls_list}
 
-            # If this is the final chunk (done=True), make sure we've yielded all tool calls
-            if chunk.get("done", False) and tool_call_chunks:
-                # We've already yielded the tool calls above, so we don't need to do anything here
-                pass
+        except Exception as e:
+            _logger.error(f"Error processing Ollama stream: {e}", exc_info=True)
+            yield {"error": f"Internal error processing Ollama stream: {e}"}
+
+    def _ollama_update_tool_call_chunk(
+        self, assembled_tool_calls, tool_call_delta, index
+    ):
+        """
+        Helper to assemble tool calls from Ollama stream chunks.
+        Ensures arguments are stored as a complete JSON string.
+        """
+        if index not in assembled_tool_calls:
+            assembled_tool_calls[index] = {
+                "id": None,
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+                "_complete": False,
+            }
+
+        current_call = assembled_tool_calls[index]
+        func_delta = tool_call_delta.get("function", {})
+
+        if func_delta.get("name"):
+            current_call["function"]["name"] = func_delta["name"]
+
+        if "arguments" in func_delta:
+            new_args_part = func_delta["arguments"]
+            if isinstance(new_args_part, dict):
+                # Pre-process dict values: attempt to parse stringified lists
+                processed_args = {}
+                for key, value in new_args_part.items():
+                    if isinstance(value, str):
+                        try:
+                            parsed_value = ast.literal_eval(value)
+                            if isinstance(parsed_value, list):
+                                processed_args[key] = parsed_value
+                            else:
+                                processed_args[key] = value
+                        except (ValueError, SyntaxError):
+                            processed_args[key] = value
+                    else:
+                        processed_args[key] = value
+                current_call["function"]["arguments"] = json.dumps(processed_args)
+            else:
+                _logger.warning(
+                    f"Unexpected argument type in Ollama stream chunk: {type(new_args_part)}"
+                )
+
+        # Use the common helper to determine completeness for Ollama
+        current_call["_complete"] = self._is_tool_call_complete(
+            current_call["function"], expected_endings=("]", "}")
+        )
+        return assembled_tool_calls
 
     def ollama_embedding(self, texts, model=None):
         """Generate embeddings using Ollama"""
@@ -327,39 +293,45 @@ class LLMProvider(models.Model):
             embeddings.append(response["embeddings"][0])
         return embeddings
 
-    def ollama_models(self):
+    def ollama_models(self, model_id=None):
         """List available Ollama models"""
-        models_response = self.client.list()
-
-        # Get models from the response
-        if hasattr(models_response, "models"):
-            models = models_response.models
+        if model_id:
+            model = self.client.show(model_id)
+            yield self._ollama_parse_model(model, model_name=model_id)
         else:
-            error_msg = f"Unexpected Ollama API response format: {models_response}"
-            _logger.error(error_msg)
-            raise ValueError(error_msg)
+            models_response = self.client.list()
+            # Get models from the response
+            if hasattr(models_response, "models"):
+                models = models_response.models
+            else:
+                error_msg = f"Unexpected Ollama API response format: {models_response}"
+                _logger.error(error_msg)
+                raise ValueError(error_msg)
 
-        for model in models:
-            model_name = model.model
+            for model in models:
+                yield self._ollama_parse_model(model)
 
-            model_info = {
-                "name": model_name,
-                "details": {
-                    "id": model_name,
-                    "capabilities": ["chat"],  # Default capability
-                    "modified_at": str(model.modified_at)
-                    if hasattr(model, "modified_at")
-                    else None,
-                    "size": model.size if hasattr(model, "size") else None,
-                    "digest": model.digest if hasattr(model, "digest") else None,
-                },
-            }
+    def _ollama_parse_model(self, model, model_name=None):
+        model_name = model_name or model.model
 
-            # Add embedding capability if model name suggests it
-            if "embedding" in model_name.lower():
-                model_info["details"]["capabilities"].append("embedding")
+        model_info = {
+            "name": model_name,
+            "details": {
+                "id": model_name,
+                "capabilities": ["chat"],  # Default capability
+                "modified_at": str(model.modified_at)
+                if hasattr(model, "modified_at")
+                else None,
+                "size": model.size if hasattr(model, "size") else None,
+                "digest": model.digest if hasattr(model, "digest") else None,
+            },
+        }
 
-            yield model_info
+        # Add embedding capability if model name suggests it
+        if "embedding" in model_name.lower():
+            model_info["details"]["capabilities"].append("embedding")
+
+        return model_info
 
     def ollama_format_messages(self, messages, system_prompt=None):
         """Format messages for Ollama API
@@ -380,63 +352,10 @@ class LLMProvider(models.Model):
 
         # Add all other messages, properly formatted
         for message in messages:
-            formatted_msg = self._format_message_for_ollama(message)
+            formatted_msg = self._dispatch("format_message", record=message)
             if formatted_msg is not None:
                 formatted_messages.append(formatted_msg)
 
         # Validate and clean messages
         validator = OllamaMessageValidator(formatted_messages)
         return validator.validate_and_clean()
-
-    def _format_message_for_ollama(self, message):
-        # Check if this is a tool message
-        if message.subtype_id and message.tool_call_id:
-            tool_message_subtype = self.env.ref("llm_tool.mt_tool_message")
-            if message.subtype_id.id == tool_message_subtype.id:
-                # Extract the tool name from the tool_call_id using the utility class
-                tool_name = ToolIdUtils.extract_tool_name_from_id(message.tool_call_id)
-
-                # If we couldn't extract a tool name, return None
-                if not tool_name:
-                    return None
-
-                return {
-                    "role": "tool",
-                    "name": tool_name,
-                    "content": message.body or "",  # Ensure content is never null
-                }
-
-        # Check if this is an assistant message with tool calls
-        if not message.author_id and message.tool_calls:
-            try:
-                tool_calls_data = json.loads(message.tool_calls)
-
-                # Process each tool call to ensure arguments are properly formatted
-                for tool_call in tool_calls_data:
-                    if "function" in tool_call and "arguments" in tool_call["function"]:
-                        # If arguments are a string that looks like JSON, parse it to a dict
-                        args = tool_call["function"]["arguments"]
-                        if (
-                            isinstance(args, str)
-                            and args.strip().startswith("{")
-                            and args.strip().endswith("}")
-                        ):
-                            try:
-                                tool_call["function"]["arguments"] = json.loads(args)
-                            except json.JSONDecodeError:
-                                _logger.warning(
-                                    f"Could not parse tool call arguments as JSON: {args}"
-                                )
-
-                return {
-                    "role": "assistant",
-                    "content": message.body or "",  # Ensure content is never null
-                    "tool_calls": tool_calls_data,
-                }
-            except (json.JSONDecodeError, ValueError) as e:
-                # If JSON parsing fails, log the error and fall back to default behavior
-                _logger.error(f"Error parsing tool calls: {str(e)}")
-                pass
-
-        # Default behavior from parent
-        return self._default_format_message(message)
