@@ -23,6 +23,7 @@ class LLMProvider(models.Model):
     )
     api_key = fields.Char()
     api_base = fields.Char()
+    api_version = fields.Char()
     model_ids = fields.One2many("llm.model", "provider_id", string="Models")
 
     @api.constrains("name")
