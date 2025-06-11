@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<templates xml:space="preserve">
+    <t t-name="web_json_editor.JsonEditorField">
+        <div class="o_field_json_editor">
+            <div t-ref="editor" class="json-editor-container" t-att-style="props.readonly ? 'min-height: 200px;' : 'min-height: 300px;'" />
+        </div>
+    </t>
+
+</templates>

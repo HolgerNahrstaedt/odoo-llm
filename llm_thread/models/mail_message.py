@@ -1,13 +1,13 @@
 import json
+import logging
 
-import markdown2
-
+import emoji
 from odoo import _, api, fields, models
+from odoo.addons.llm_mail_message_subtypes.const import \
+    LLM_TOOL_RESULT_SUBTYPE_XMLID
 from odoo.exceptions import MissingError, UserError, ValidationError
 
-from odoo.addons.llm_mail_message_subtypes.const import (
-    LLM_TOOL_RESULT_SUBTYPE_XMLID,
-)
+_logger = logging.getLogger(__name__)
 
 
 class MailMessage(models.Model):
@@ -39,6 +39,8 @@ class MailMessage(models.Model):
                 "tool_call_definition",
                 "tool_call_result",
                 "user_vote",
+                "email_from",
+                "author_id",
             ]
         )
         return fields_list
@@ -70,6 +72,15 @@ class MailMessage(models.Model):
             )
 
     @api.model
+    def _process_message_body(self, body):
+        """Process message body content - keep as plain text to avoid HTML encoding issues."""
+        if not body:
+            return body
+            
+        # Just apply emoji processing, no HTML conversion
+        return emoji.demojize(body)
+
+    @api.model
     def create_message_from_stream(
         self, thread, stream, subtype_xmlid, placeholder_text="…"
     ):
@@ -94,7 +105,7 @@ class MailMessage(models.Model):
 
             if chunk.get("content"):
                 acc += chunk["content"]
-                msg.write({"body": markdown2.markdown(acc)})
+                msg.write({"body": self._process_message_body(acc)})
                 yield {"type": "message_chunk", "message": msg.message_format()[0]}
 
             if chunk.get("tool_calls"):
@@ -110,11 +121,12 @@ class MailMessage(models.Model):
             if chunk.get("error"):
                 yield {"type": "error", "error": chunk["error"]}
                 return
-
+        if not msg:
+            return
         # final write & update
         msg.write(
             {
-                **({"body": markdown2.markdown(acc)} if acc else {}),
+                **({"body": self._process_message_body(acc)} if acc else {}),
                 **({"tool_calls": json.dumps(calls)} if calls else {}),
             }
         )
